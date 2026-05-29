@@ -6,7 +6,8 @@ import pandas as pd
 from pathlib import Path
 
 # --- Tunable detection parameters ---
-TAPE_EDGE_COLS    = 60    # Use leftmost N columns of ROI (the tape edge)
+TAPE_EDGE_COLS    = 57    # Number of columns to use for median profile
+TAPE_COL_OFFSET   = 48    # Starting column offset (skips Sharpie mark on left)
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
 DIFF_SMOOTH       = 15    # Boxcar kernel for smoothing diff profile
 MIN_DIFF_CONFIDENCE = 10   # Minimum peak abs difference to confirm detection; else treat as baseline
@@ -31,7 +32,9 @@ roi = cal["roi"]
 fps = cal["fps"]
 x, y, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
 
-edge_cols = min(TAPE_EDGE_COLS, w)
+col_start = min(TAPE_COL_OFFSET, w - 1)
+col_end = min(col_start + TAPE_EDGE_COLS, w)
+col_slice = slice(col_start, col_end)
 search_start = int(h * SEARCH_START_FRAC)
 search_end = int(h * SEARCH_END_FRAC)
 
@@ -54,8 +57,8 @@ total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 results = []
 frame_index = 0
 
-def detect_water_surface(roi_gray, baseline, edge_cols, search_start, search_end, air_ref):
-    sub = roi_gray[:, :edge_cols].astype(np.float32)
+def detect_water_surface(roi_gray, baseline, col_slice, search_start, search_end, air_ref):
+    sub = roi_gray[:, col_slice].astype(np.float32)
     air_frame = np.median(sub[:AIR_REF_ROWS])
     if air_ref > 0 and air_frame > 0:
         scale = air_ref / air_frame
@@ -105,7 +108,7 @@ if n_baseline == 0:
     print("Failed to read any frames for baseline.")
     sys.exit(1)
 
-baseline_stack = np.stack(baseline_frames_list, axis=0)[:, :, :edge_cols]
+baseline_stack = np.stack(baseline_frames_list, axis=0)[:, :, col_slice]
 baseline_profile = np.median(baseline_stack, axis=0).astype(np.float32)
 baseline_frames_list = None
 baseline_y = float(search_end)
@@ -123,7 +126,7 @@ while cap.isOpened():
             break
         timestamp = round(frame_index / fps, 4)
         roi_gray = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
-        surface_y = detect_water_surface(roi_gray, baseline_profile, edge_cols,
+        surface_y = detect_water_surface(roi_gray, baseline_profile, col_slice,
                                           search_start, search_end, air_ref)
         pixel_displacement = baseline_y - surface_y
         wave_height_cm = round(pixel_displacement / pixels_per_cm, 3)
