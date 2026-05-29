@@ -12,6 +12,7 @@ DIFF_SMOOTH       = 15    # Boxcar kernel for smoothing diff profile
 MIN_DIFF_CONFIDENCE = 10   # Minimum peak abs difference to confirm detection; else treat as baseline
 SEARCH_START_FRAC = 0.25  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
+AIR_REF_ROWS      = 30    # Top rows used as air brightness reference
 
 PREVIEW_EVERY_N_FRAMES = 128
 
@@ -53,8 +54,13 @@ total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 results = []
 frame_index = 0
 
-def detect_water_surface(roi_gray, baseline, edge_cols, search_start, search_end):
+def detect_water_surface(roi_gray, baseline, edge_cols, search_start, search_end, air_ref):
     sub = roi_gray[:, :edge_cols].astype(np.float32)
+    air_frame = np.median(sub[:AIR_REF_ROWS])
+    if air_ref > 0 and air_frame > 0:
+        scale = air_ref / air_frame
+        sub = sub * scale
+        sub = np.clip(sub, 0, 255)
     if baseline.shape != sub.shape:
         bl = cv2.resize(baseline, (sub.shape[1], sub.shape[0]), interpolation=cv2.INTER_LINEAR)
     else:
@@ -103,9 +109,11 @@ baseline_stack = np.stack(baseline_frames_list, axis=0)[:, :, :edge_cols]
 baseline_profile = np.median(baseline_stack, axis=0).astype(np.float32)
 baseline_frames_list = None
 baseline_y = float(search_end)
+air_ref = float(np.median(baseline_profile[:AIR_REF_ROWS]))
 print(f"Baseline frames: {n_baseline}")
 print(f"Baseline (still water row): {baseline_y:.0f} ROI-relative, "
       f"pixels_per_cm: {pixels_per_cm}")
+print(f"Air brightness reference: {air_ref:.1f}")
 
 # --- Second pass: process remaining frames ---
 while cap.isOpened():
@@ -116,7 +124,7 @@ while cap.isOpened():
         timestamp = round(frame_index / fps, 4)
         roi_gray = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
         surface_y = detect_water_surface(roi_gray, baseline_profile, edge_cols,
-                                          search_start, search_end)
+                                          search_start, search_end, air_ref)
         pixel_displacement = baseline_y - surface_y
         wave_height_cm = round(pixel_displacement / pixels_per_cm, 3)
         if surface_y == 0:
