@@ -6,10 +6,10 @@ import pandas as pd
 from pathlib import Path
 
 # --- Tunable detection parameters ---
-TAPE_EDGE_COLS    = 60    # Number of columns to use for median profile
+TAPE_EDGE_COLS    = 10    # Number of columns to use for median profile (background only)
 TAPE_COL_OFFSET   = 0     # Starting column offset in ROI
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
-DIFF_SMOOTH       = 101   # Large boxcar kernel for smoothing diff profile (suppresses tick marks)
+DIFF_SMOOTH       = 51    # Boxcar kernel for smoothing diff profile
 MIN_DIFF_CONFIDENCE = 4   # Minimum peak abs difference to confirm detection; else treat as baseline
 SEARCH_START_FRAC = 0.25  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
