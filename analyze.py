@@ -10,7 +10,7 @@ TAPE_EDGE_COLS    = 60    # Use leftmost N columns of ROI (the tape edge)
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
 DIFF_SMOOTH       = 15    # Boxcar kernel for smoothing diff profile
 MIN_DIFF_CONFIDENCE = 4    # Minimum peak abs difference to confirm detection; else treat as baseline
-SEARCH_START_FRAC = 0.50  # Fraction of ROI height to start water surface search
+SEARCH_START_FRAC = 0.25  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
 
 # --- Legacy constants (kept for backward reference) ---
