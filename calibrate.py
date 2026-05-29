@@ -3,6 +3,7 @@ import cv2
 import json
 import numpy as np
 
+TAPE_EDGE_COLS = 60  # matches analyze.py — leftmost columns used for detection
 
 def _show_scaled(window_name, image, max_width=1280, max_height=720):
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
@@ -44,6 +45,8 @@ if w == 0 or h == 0:
 
 if w > 200:
     print(f"WARNING: ROI width is {w}px — may include non-tape regions.")
+if w > 60:
+    print(f"NOTE: ROI width {w}px is wider than the tape edge ({TAPE_EDGE_COLS}px used by analyze.py).")
 
 roi_frame = frame[y:y+h, x:x+w]
 _show_scaled("ROI - Click two points on the tape", roi_frame)
