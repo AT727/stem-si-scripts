@@ -8,9 +8,8 @@ from pathlib import Path
 # --- Tunable detection parameters ---
 TAPE_EDGE_COLS    = 60    # Number of columns to use for median profile
 TAPE_COL_OFFSET   = 0     # Starting column offset in ROI
-DIFF_CROSS_FRAC   = 0.50  # Fraction of peak diff for threshold crossing detection
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
-DIFF_SMOOTH       = 15    # Boxcar kernel for smoothing diff profile
+DIFF_SMOOTH       = 101   # Large boxcar kernel for smoothing diff profile (suppresses tick marks)
 MIN_DIFF_CONFIDENCE = 4   # Minimum peak abs difference to confirm detection; else treat as baseline
 SEARCH_START_FRAC = 0.25  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
@@ -60,11 +59,12 @@ frame_index = 0
 
 def detect_water_surface(roi_gray, baseline, col_slice, search_start, search_end, air_ref):
     sub = roi_gray[:, col_slice].astype(np.float32)
+    # Air brightness normalization (corrects camera auto-exposure)
     air_frame = np.median(sub[:AIR_REF_ROWS])
     if air_ref > 0 and air_frame > 0:
         scale = air_ref / air_frame
         sub = sub * scale
-        sub = np.clip(sub, 0, 255)
+    sub = np.clip(sub, 0, 255)
     if baseline.shape != sub.shape:
         bl = cv2.resize(baseline, (sub.shape[1], sub.shape[0]), interpolation=cv2.INTER_LINEAR)
     else:
@@ -75,17 +75,19 @@ def detect_water_surface(roi_gray, baseline, col_slice, search_start, search_end
     k = np.ones(DIFF_SMOOTH) / DIFF_SMOOTH
     diff_sm = np.convolve(diff, k, mode='same')
 
-    reg = diff_sm[search_start:search_end]
+    # Subtract median diff in air region to cancel residual exposure drift
+    air_offset = np.median(diff_sm[:AIR_REF_ROWS * 4])
+    diff_norm = np.maximum(diff_sm - air_offset, 0)
+
+    reg = diff_norm[search_start:search_end]
 
     if np.max(reg) < MIN_DIFF_CONFIDENCE:
         return search_end
 
-    peak = np.max(reg)
-    threshold = np.min(reg) + (peak - np.min(reg)) * DIFF_CROSS_FRAC
-    crossings = np.where(reg >= threshold)[0]
-    if len(crossings) == 0:
+    gradients = np.diff(reg)
+    if len(gradients) == 0:
         return search_end
-    return search_start + crossings[0]
+    return search_start + np.argmax(gradients)
 
 # --- First pass: accumulate baseline frames ---
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
