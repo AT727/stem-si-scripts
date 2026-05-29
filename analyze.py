@@ -9,8 +9,7 @@ from pathlib import Path
 TAPE_EDGE_COLS    = 60    # Use leftmost N columns of ROI (the tape edge)
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
 DIFF_SMOOTH       = 15    # Boxcar kernel for smoothing diff profile
-NEG_WINDOW        = 15    # Running-average window for sustained negativity search
-NEG_THRESHOLD     = -12   # Diff threshold: rows at/below this are water-darkened
+MIN_DIFF_CONFIDENCE = 4    # Minimum peak abs difference to confirm detection; else treat as baseline
 SEARCH_START_FRAC = 0.50  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
 
@@ -65,24 +64,22 @@ def detect_water_surface(roi_gray, baseline, edge_cols, search_start, search_end
         bl = cv2.resize(baseline, (sub.shape[1], sub.shape[0]), interpolation=cv2.INTER_LINEAR)
     else:
         bl = baseline
-    diff = np.median(sub - bl, axis=1)
+
+    diff = np.median(np.abs(sub - bl), axis=1)
+
     k = np.ones(DIFF_SMOOTH) / DIFF_SMOOTH
     diff_sm = np.convolve(diff, k, mode='same')
+
     reg = diff_sm[search_start:search_end]
-    if len(reg) < NEG_WINDOW:
-        for i in range(len(reg)):
-            if reg[i] < -5:
-                return search_start + i
+
+    if np.max(reg) < MIN_DIFF_CONFIDENCE:
         return search_end
-    run_avg = np.convolve(reg, np.ones(NEG_WINDOW) / NEG_WINDOW, mode='valid')
-    bad = np.where(run_avg < NEG_THRESHOLD)[0]
-    if len(bad) > 0:
-        offset = bad[0] + NEG_WINDOW // 2
-        return search_start + offset
-    for i in range(len(reg) - 10):
-        if all(reg[i:i+10] < -5):
-            return search_start + i
-    return search_end
+
+    gradients = np.abs(np.diff(reg))
+    if len(gradients) == 0:
+        return search_end
+
+    return search_start + np.argmax(gradients)
 
 # --- First pass: accumulate baseline frames ---
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -126,7 +123,7 @@ while cap.isOpened():
         surface_y = detect_water_surface(roi_gray, baseline_profile, edge_cols,
                                           search_start, search_end)
         pixel_displacement = baseline_y - surface_y
-        wave_height_cm = round(max(0, pixel_displacement) / pixels_per_cm, 3)
+        wave_height_cm = round(pixel_displacement / pixels_per_cm, 3)
         if surface_y == 0:
             print(f"Warning: surface clipped at ROI top edge, frame {frame_index}")
         results.append({
