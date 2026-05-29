@@ -4,14 +4,18 @@ import cv2
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from scipy.ndimage import uniform_filter1d
+from scipy.signal import savgol_filter
 
 # --- Tunable detection parameters ---
 TAPE_EDGE_COLS    = 60    # Use leftmost N columns of ROI (the tape edge)
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
+TRACKING_WIDTH    = 40    # Pixels to use from left (water only, exclude tape)
 DIFF_SMOOTH       = 15    # Boxcar kernel for smoothing diff profile
 MIN_DIFF_CONFIDENCE = 4    # Minimum peak abs difference to confirm detection; else treat as baseline
-SEARCH_START_FRAC = 0.50  # Fraction of ROI height to start water surface search
+SEARCH_START_FRAC = 0.10  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
+MAX_CM_PER_FRAME = 1.5    # Max physical wave velocity
 
 # --- Legacy constants (kept for backward reference) ---
 INTENSITY_THRESHOLD    = 80
@@ -59,27 +63,39 @@ results = []
 frame_index = 0
 
 def detect_water_surface(roi_gray, baseline, edge_cols, search_start, search_end):
-    sub = roi_gray[:, :edge_cols].astype(np.float32)
+    sub = roi_gray[:, :TRACKING_WIDTH].astype(np.float32)
     if baseline.shape != sub.shape:
         bl = cv2.resize(baseline, (sub.shape[1], sub.shape[0]), interpolation=cv2.INTER_LINEAR)
     else:
         bl = baseline
 
-    diff = np.median(np.abs(sub - bl), axis=1)
+    # 1. 2D Absolute Difference
+    diff_2d = np.abs(sub - bl)
 
-    k = np.ones(DIFF_SMOOTH) / DIFF_SMOOTH
-    diff_sm = np.convolve(diff, k, mode='same')
+    # 2. 2D Vertical Smoothing
+    smoothed_diff = uniform_filter1d(diff_2d, size=DIFF_SMOOTH, axis=0)
 
-    reg = diff_sm[search_start:search_end]
+    # 3. Search Area Crop
+    reg_2d = smoothed_diff[search_start:search_end, :]
 
-    if np.max(reg) < MIN_DIFF_CONFIDENCE:
+    # 4. Vertical Gradient
+    gradients = np.abs(np.diff(reg_2d, axis=0))
+    
+    if gradients.size == 0:
         return search_end
 
-    gradients = np.abs(np.diff(reg))
-    if len(gradients) == 0:
+    # 5. Per-Column Peak and Confidence Filtering
+    peak_indices = np.argmax(gradients, axis=0)
+    max_gradients = np.max(gradients, axis=0)
+    
+    valid_mask = max_gradients >= MIN_DIFF_CONFIDENCE
+    valid_peaks = peak_indices[valid_mask]
+    
+    if valid_peaks.size == 0:
         return search_end
 
-    return search_start + np.argmax(gradients)
+    # 6. Robust Median
+    return search_start + np.median(valid_peaks)
 
 # --- First pass: accumulate baseline frames ---
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -104,10 +120,14 @@ if n_baseline == 0:
     print("Failed to read any frames for baseline.")
     sys.exit(1)
 
-baseline_stack = np.stack(baseline_frames_list, axis=0)[:, :, :edge_cols]
+baseline_stack = np.stack(baseline_frames_list, axis=0)[:, :, :TRACKING_WIDTH]
 baseline_profile = np.median(baseline_stack, axis=0).astype(np.float32)
 baseline_frames_list = None
-baseline_y = float(search_end)
+if "baseline_y" in cal:
+    baseline_y = float(cal["baseline_y"])
+else:
+    baseline_y = float(search_end)
+    print("Warning: 'baseline_y' not found in JSON. Falling back to search_end.")
 print(f"Baseline frames: {n_baseline}")
 print(f"Baseline (still water row): {baseline_y:.0f} ROI-relative, "
       f"pixels_per_cm: {pixels_per_cm}")
@@ -143,6 +163,16 @@ while cap.isOpened():
 cap.release()
 
 df = pd.DataFrame(results)
+# Identify physically impossible spikes
+displacements = df['wave_height_cm'].diff().abs()
+spike_mask = displacements > MAX_CM_PER_FRAME
+df.loc[spike_mask, 'wave_height_cm'] = np.nan
+
+# Interpolate spikes
+df['wave_height_cm'] = df['wave_height_cm'].interpolate(method='linear')
+
+# Apply Savitzky-Golay filter
+df['wave_height_filtered_cm'] = savgol_filter(df['wave_height_cm'], window_length=11, polyorder=2)
 df.to_csv(output_path, index=False)
 
 print(f"\nTotal frames processed: {frame_index}")
@@ -158,13 +188,38 @@ else:
     print("No valid detections.")
 
 import matplotlib.pyplot as plt
-plot_frame = df.dropna(subset=['wave_height_cm'])
+from matplotlib.ticker import MultipleLocator
+
+# Ensure we only plot rows that have valid data
+plot_frame = df.dropna(subset=['wave_height_cm', 'wave_height_filtered_cm'])
+
 plt.figure(figsize=(12, 5))
-plt.plot(plot_frame['timestamp_s'], plot_frame['wave_height_cm'], linewidth=0.5)
-plt.axhline(y=0, color='gray', linestyle='--', linewidth=0.8, label='Baseline')
-plt.title('Wave Height Over Time')
+
+# --- Plot 1: Raw Optical Data ---
+# Rendered in light gray with transparency so you can see the noise profile without it dominating the chart
+plt.plot(plot_frame['timestamp_s'], plot_frame['wave_height_cm'], 
+         color='gray', alpha=0.4, linewidth=0.8, label='Raw CV Data (Optical Noise)')
+
+# --- Plot 2: Temporally Filtered Data ---
+# Rendered in bold blue to show the true physical wave envelope
+plt.plot(plot_frame['timestamp_s'], plot_frame['wave_height_filtered_cm'], 
+         color='blue', linewidth=1.5, label='Filtered Data (Savitzky-Golay)')
+
+# --- Plot 3: Baseline ---
+plt.axhline(y=0, color='black', linestyle='--', linewidth=0.8, label='Baseline')
+
+# Chart styling
+plt.title('Wave Height Over Time: Raw vs. Filtered')
 plt.xlabel('Time (s)')
 plt.ylabel('Wave Height (cm)')
+plt.legend(loc='upper right')
+plt.grid(True, alpha=0.3)
+
+# --- FORCE AXIS INCREMENTS TO 2 ---
+plt.gca().xaxis.set_major_locator(MultipleLocator(2))
+plt.gca().yaxis.set_major_locator(MultipleLocator(2))
+
+# Save the plot
 plot_path = Path(output_path).parent / "wave_height_plot.png"
-plt.savefig(plot_path, dpi=150)
+plt.savefig(plot_path, dpi=150, bbox_inches='tight')
 print(f"Plot saved to {plot_path}")

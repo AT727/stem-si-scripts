@@ -13,7 +13,6 @@ def _show_scaled(window_name, image, max_width=1280, max_height=720):
     cv2.resizeWindow(window_name, display_w, display_h)
     cv2.imshow(window_name, image)
 
-
 cap = cv2.VideoCapture(sys.argv[1])
 ret, frame = cap.read()
 if not ret:
@@ -32,8 +31,8 @@ if fps < 1:
     fps = float(input("FPS is 0 or invalid. Enter FPS manually: "))
 
 _show_scaled("First Frame - Select ROI around tape column", frame)
-print("Draw a rectangle tightly around the measuring tape column.")
-print("WARNING: Exclude the right side of the frame (blue foam board).")
+print("Draw a rectangle tightly around the measuring tape column ONLY.")
+print(f"The script will automatically expand the box {TAPE_EDGE_COLS}px to the left for the water.")
 roi = cv2.selectROI("First Frame - Select ROI around tape column", frame)
 cv2.destroyWindow("First Frame - Select ROI around tape column")
 
@@ -43,13 +42,24 @@ if w == 0 or h == 0:
     print("ROI selection cancelled. Exiting.")
     sys.exit(1)
 
-if w > 200:
-    print(f"WARNING: ROI width is {w}px — may include non-tape regions.")
-if w > 60:
-    print(f"NOTE: ROI width {w}px is wider than the tape edge ({TAPE_EDGE_COLS}px used by analyze.py).")
+# --- AUTO-ADJUST ROI TO THE LEFT ---
+# Shift x left by TAPE_EDGE_COLS to capture the water column
+new_x = max(0, x - TAPE_EDGE_COLS)
+added_cols = x - new_x
+new_w = w + added_cols
 
-roi_frame = frame[y:y+h, x:x+w]
-_show_scaled("ROI - Click two points on the tape", roi_frame)
+print(f"\nAuto-adjusting ROI: shifting left by {added_cols}px to include water column.")
+
+roi_frame = frame[y:y+h, new_x:new_x+new_w]
+
+# --- DRAW VISUAL GUIDES ---
+# Create a copy with a strict boundary line so the user can verify the left 60px is water
+guide_display = roi_frame.copy()
+cv2.line(guide_display, (added_cols, 0), (added_cols, h), (0, 0, 255), 2)
+cv2.putText(guide_display, "WATER ZONE", (5, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+cv2.putText(guide_display, "TAPE ZONE", (added_cols + 10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+_show_scaled("ROI - Click two points on the tape", guide_display)
 
 clicks = []
 
@@ -57,7 +67,7 @@ def mouse_callback(event, x_roi, y_roi, flags, param):
     if event == cv2.EVENT_LBUTTONDOWN and len(clicks) < 2:
         clicks.append((x_roi, y_roi))
         print(f"Click {len(clicks)}: ({x_roi}, {y_roi})")
-        display = roi_frame.copy()
+        display = guide_display.copy()
         for i, (cx, cy) in enumerate(clicks):
             color = (0, 255, 0) if i == 0 else (255, 0, 0)
             cv2.circle(display, (cx, cy), 5, color, -1)
@@ -67,7 +77,7 @@ def mouse_callback(event, x_roi, y_roi, flags, param):
 
 cv2.setMouseCallback("ROI - Click two points on the tape", mouse_callback)
 
-print("\nClick two points on the measuring tape:")
+print("\nClick two points on the measuring tape (Right of the red line):")
 print("  Click 1: the zero/still-water baseline mark")
 print("  Click 2: a known reference point N cm above it")
 print("(Press any key after both clicks are placed)\n")
@@ -94,9 +104,10 @@ if pixel_distance < 5:
 pixels_per_cm = pixel_distance / ref_cm
 baseline_y = point1[1]
 
+# Save the newly adjusted X and W parameters
 calibration = {
     "pixels_per_cm": round(pixels_per_cm, 2),
-    "roi": {"x": x, "y": y, "w": w, "h": h},
+    "roi": {"x": new_x, "y": y, "w": new_w, "h": h},
     "baseline_y": baseline_y,
     "fps": fps
 }
@@ -110,14 +121,15 @@ with open("calibration.json", "r") as f:
     saved = json.load(f)
 print("Saved calibration.json — valid JSON confirmed")
 
-confirm = roi_frame.copy()
+# Draw the final confirmation overlay
+confirm = guide_display.copy()
 for i, (cx, cy) in enumerate(clicks):
     color = (0, 255, 0) if i == 0 else (255, 0, 0)
     cv2.circle(confirm, (cx, cy), 5, color, -1)
     cv2.putText(confirm, str(i + 1), (cx + 8, cy - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-cv2.line(confirm, (0, baseline_y), (w - 1, baseline_y), (0, 255, 255), 1)
+cv2.line(confirm, (0, baseline_y), (new_w - 1, baseline_y), (0, 255, 255), 1)
 cv2.putText(confirm, "baseline", (5, baseline_y - 5),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
