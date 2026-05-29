@@ -48,6 +48,8 @@ if w > 200:
 roi_frame = frame[y:y+h, x:x+w]
 _show_scaled("ROI - Click two points on the tape", roi_frame)
 
+DRY_TAPE_PATCH_HALF = 7
+
 clicks = []
 
 def mouse_callback(event, x_roi, y_roi, flags, param):
@@ -91,12 +93,57 @@ if pixel_distance < 5:
 pixels_per_cm = pixel_distance / ref_cm
 baseline_y = point1[1]
 
+# --- Dry-tape reference sampling ---
+roi_gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+_show_scaled("ROI - Click dry tape above waterline", roi_frame)
+
+dry_tape_clicks = []
+
+def dry_tape_callback(event, x_roi, y_roi, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN and len(dry_tape_clicks) == 0:
+        dry_tape_clicks.append((x_roi, y_roi))
+        print(f"Dry-tape click: ({x_roi}, {y_roi})")
+        display = roi_frame.copy()
+        cx, cy = dry_tape_clicks[0]
+        cv2.circle(display, (cx, cy), 5, (0, 255, 0), -1)
+        x1 = max(0, cx - DRY_TAPE_PATCH_HALF)
+        y1 = max(0, cy - DRY_TAPE_PATCH_HALF)
+        x2 = min(w - 1, cx + DRY_TAPE_PATCH_HALF)
+        y2 = min(h - 1, cy + DRY_TAPE_PATCH_HALF)
+        cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 1)
+        cv2.imshow("ROI - Click dry tape above waterline", display)
+
+cv2.setMouseCallback("ROI - Click dry tape above waterline", dry_tape_callback)
+
+print("\nClick a point on the dry tape above the waterline to sample reference brightness.")
+print("(Press any key to skip — will use default threshold values)\n")
+
+cv2.waitKey(0)
+cv2.destroyWindow("ROI - Click dry tape above waterline")
+
+dry_tape_mean = None
+if len(dry_tape_clicks) > 0:
+    cx, cy = dry_tape_clicks[0]
+    if cy >= baseline_y:
+        print("Warning: Dry-tape click is at or below the baseline — sampled area may be wet.")
+    x1 = max(0, cx - DRY_TAPE_PATCH_HALF)
+    y1 = max(0, cy - DRY_TAPE_PATCH_HALF)
+    x2 = min(w - 1, cx + DRY_TAPE_PATCH_HALF)
+    y2 = min(h - 1, cy + DRY_TAPE_PATCH_HALF)
+    patch = roi_gray[y1:y2+1, x1:x2+1]
+    dry_tape_mean = round(float(np.mean(patch)), 1)
+    print(f"Dry-tape mean intensity: {dry_tape_mean}")
+else:
+    print("Warning: No dry-tape reference sampled — analysis will use default threshold values")
+
 calibration = {
     "pixels_per_cm": round(pixels_per_cm, 2),
     "roi": {"x": x, "y": y, "w": w, "h": h},
     "baseline_y": baseline_y,
     "fps": fps
 }
+if dry_tape_mean is not None:
+    calibration["dry_tape_mean"] = dry_tape_mean
 
 with open("calibration.json", "w") as f:
     json.dump(calibration, f, indent=2)
@@ -117,6 +164,16 @@ for i, (cx, cy) in enumerate(clicks):
 cv2.line(confirm, (0, baseline_y), (w - 1, baseline_y), (0, 255, 255), 1)
 cv2.putText(confirm, "baseline", (5, baseline_y - 5),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+if dry_tape_mean is not None:
+    cx, cy = dry_tape_clicks[0]
+    x1 = max(0, cx - DRY_TAPE_PATCH_HALF)
+    y1 = max(0, cy - DRY_TAPE_PATCH_HALF)
+    x2 = min(w - 1, cx + DRY_TAPE_PATCH_HALF)
+    y2 = min(h - 1, cy + DRY_TAPE_PATCH_HALF)
+    cv2.rectangle(confirm, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv2.putText(confirm, f"dry tape {dry_tape_mean}", (x2 + 5, y1),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
 _show_scaled("Calibration Verification", confirm)
 print("Close the window to exit.")

@@ -53,3 +53,8 @@ project/
 ├── analyze.py                       ← analyze.py (to be created)
 └── calibration.json / output.csv / plots  ← runtime artifacts
 ```
+
+## Superpowers
+- Always use using-superpowers when executing any task 
+- Always use systematic-debugging when fixing bugs
+- Never use finishing-a-development-branch because I do all version control
