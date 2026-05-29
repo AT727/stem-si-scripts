@@ -2,10 +2,7 @@
 calibration.json
 output.csv
 wave_height_plot.png
-results.tsv
-metrics.json
-run.log
-benchmark_aligned.csv
+PhaseII_*.MP4
 
 # Python
 __pycache__/

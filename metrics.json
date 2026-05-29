@@ -1,0 +1,9 @@
+{
+  "rmse_cm": 2.6802,
+  "nrmse_pct": 32.2918,
+  "max_height_cm": 8.755,
+  "min_height_cm": 0.0,
+  "bench_max_height_cm": 8.2922,
+  "bench_min_height_cm": -0.0078,
+  "detection_failures": 0
+}
