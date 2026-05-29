@@ -6,14 +6,12 @@ import pandas as pd
 from pathlib import Path
 
 # --- Tunable detection parameters ---
-TAPE_EDGE_COLS    = 10    # Number of columns to use for median profile (background only)
+TAPE_EDGE_COLS    = 60    # Number of columns to use for median profile
 TAPE_COL_OFFSET   = 0     # Starting column offset in ROI
-BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
-DIFF_SMOOTH       = 151   # Boxcar kernel for smoothing diff profile (suppresses Sharpie dip)
-MIN_DIFF_CONFIDENCE = 4   # Minimum peak abs difference to confirm detection; else treat as baseline
+DIFF_SMOOTH       = 7     # Boxcar kernel for smoothing temporal diff profile
+MIN_DIFF_CONFIDENCE = 6   # Minimum peak temporal diff to confirm wave motion; else treat as baseline
 SEARCH_START_FRAC = 0.25  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
-AIR_REF_ROWS      = 50    # Top rows used as air brightness reference
 
 PREVIEW_EVERY_N_FRAMES = 128
 
@@ -37,6 +35,7 @@ col_end = min(col_start + TAPE_EDGE_COLS, w)
 col_slice = slice(col_start, col_end)
 search_start = int(h * SEARCH_START_FRAC)
 search_end = int(h * SEARCH_END_FRAC)
+baseline_y = search_end
 
 cap = cv2.VideoCapture(video_path)
 if not cap.isOpened():
@@ -55,101 +54,61 @@ if x + w > frame_w or y + h > frame_h:
 
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 results = []
-frame_index = 0
 
-def detect_water_surface(roi_gray, baseline, col_slice, search_start, search_end, air_ref):
-    sub = roi_gray[:, col_slice].astype(np.float32)
-    # Air brightness normalization (corrects camera auto-exposure)
-    air_frame = np.median(sub[:AIR_REF_ROWS])
-    if air_ref > 0 and air_frame > 0:
-        scale = air_ref / air_frame
-        sub = sub * scale
-    sub = np.clip(sub, 0, 255)
-    if baseline.shape != sub.shape:
-        bl = cv2.resize(baseline, (sub.shape[1], sub.shape[0]), interpolation=cv2.INTER_LINEAR)
-    else:
-        bl = baseline
-
-    diff = np.median(np.abs(sub - bl), axis=1)
-
+def detect_water_surface(roi_gray, prev_roi_gray, col_slice, search_start, search_end):
+    curr = roi_gray[:, col_slice].astype(np.float32)
+    prev = prev_roi_gray[:, col_slice].astype(np.float32)
+    
+    if curr.shape != prev.shape:
+        prev = cv2.resize(prev, (curr.shape[1], curr.shape[0]), interpolation=cv2.INTER_LINEAR)
+    
+    diff = np.median(np.abs(curr - prev), axis=1)
+    
     k = np.ones(DIFF_SMOOTH) / DIFF_SMOOTH
     diff_sm = np.convolve(diff, k, mode='same')
-
-    # Subtract median diff in air region (avoids boundary effects, stays above search window)
-    air_end = min(DIFF_SMOOTH // 2 + AIR_REF_ROWS * 4, search_start)
-    air_region = slice(DIFF_SMOOTH // 2, air_end)
-    air_offset = np.median(diff_sm[air_region])
-    diff_norm = np.maximum(diff_sm - air_offset, 0)
-
-    reg = diff_norm[search_start:search_end]
-
+    
+    reg = diff_sm[search_start:search_end]
+    
     if np.max(reg) < MIN_DIFF_CONFIDENCE:
         return search_end
+    
+    return search_start + np.argmax(reg)
 
-    gradients = np.diff(reg)
-    if len(gradients) == 0:
-        return search_end
-    return search_start + np.argmax(gradients)
-
-# --- First pass: accumulate baseline frames ---
+# --- Process all frames using frame-differencing ---
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-baseline_frames_list = []
-baseline_count = 0
-while baseline_count < BASELINE_FRAMES:
-    ret, frame = cap.read()
-    if not ret:
-        break
-    roi_gray = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
-    baseline_frames_list.append(roi_gray)
-    results.append({
-        'frame_number': baseline_count,
-        'timestamp_s': round(baseline_count / fps, 4),
-        'wave_height_cm': 0.0
-    })
-    baseline_count += 1
-    frame_index += 1
+prev_roi_gray = None
+frame_count = 0
 
-n_baseline = len(baseline_frames_list)
-if n_baseline == 0:
-    print("Failed to read any frames for baseline.")
-    sys.exit(1)
-
-baseline_stack = np.stack(baseline_frames_list, axis=0)[:, :, col_slice]
-baseline_profile = np.median(baseline_stack, axis=0).astype(np.float32)
-baseline_frames_list = None
-baseline_y = float(search_end)
-air_ref = float(np.median(baseline_profile[:AIR_REF_ROWS]))
-print(f"Baseline frames: {n_baseline}")
-print(f"Baseline (still water row): {baseline_y:.0f} ROI-relative, "
-      f"pixels_per_cm: {pixels_per_cm}")
-print(f"Air brightness reference: {air_ref:.1f}")
-
-# --- Second pass: process remaining frames ---
 while cap.isOpened():
     try:
         ret, frame = cap.read()
         if not ret:
             break
-        timestamp = round(frame_index / fps, 4)
+        timestamp = round(frame_count / fps, 4)
         roi_gray = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
-        surface_y = detect_water_surface(roi_gray, baseline_profile, col_slice,
-                                          search_start, search_end, air_ref)
+
+        if prev_roi_gray is None:
+            surface_y = search_end
+            prev_roi_gray = roi_gray
+        else:
+            surface_y = detect_water_surface(roi_gray, prev_roi_gray, col_slice,
+                                              search_start, search_end)
+            prev_roi_gray = roi_gray
+
         pixel_displacement = baseline_y - surface_y
         wave_height_cm = round(pixel_displacement / pixels_per_cm, 3)
-        if surface_y == 0:
-            print(f"Warning: surface clipped at ROI top edge, frame {frame_index}")
         results.append({
-            'frame_number': frame_index,
+            'frame_number': frame_count,
             'timestamp_s': timestamp,
             'wave_height_cm': wave_height_cm
         })
-        frame_index += 1
-        if frame_index % PREVIEW_EVERY_N_FRAMES == 0:
-            pct = 100 * frame_index / total_frames
-            print(f"Processed frame {frame_index} / {total_frames} ({pct:.1f}%)")
+        frame_count += 1
+        if frame_count % PREVIEW_EVERY_N_FRAMES == 0:
+            pct = 100 * frame_count / total_frames
+            print(f"Processed frame {frame_count} / {total_frames} ({pct:.1f}%)")
     except Exception as e:
-        print(f"Error processing frame {frame_index}: {e}")
-        frame_index += 1
+        print(f"Error processing frame {frame_count}: {e}")
+        frame_count += 1
         continue
 
 cap.release()
@@ -157,7 +116,7 @@ cap.release()
 df = pd.DataFrame(results)
 df.to_csv(output_path, index=False)
 
-print(f"\nTotal frames processed: {frame_index}")
+print(f"\nTotal frames processed: {frame_count}")
 none_count = df['wave_height_cm'].isna().sum()
 print(f"Detection failures: {none_count}")
 
