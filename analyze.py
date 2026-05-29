@@ -6,11 +6,12 @@ import pandas as pd
 from pathlib import Path
 
 # --- Tunable detection parameters ---
-TAPE_EDGE_COLS    = 57    # Number of columns to use for median profile
-TAPE_COL_OFFSET   = 48    # Starting column offset (skips Sharpie mark on left)
+TAPE_EDGE_COLS    = 60    # Number of columns to use for median profile
+TAPE_COL_OFFSET   = 0     # Starting column offset in ROI
+DIFF_CROSS_FRAC   = 0.50  # Fraction of peak diff for threshold crossing detection
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
 DIFF_SMOOTH       = 15    # Boxcar kernel for smoothing diff profile
-MIN_DIFF_CONFIDENCE = 10   # Minimum peak abs difference to confirm detection; else treat as baseline
+MIN_DIFF_CONFIDENCE = 4   # Minimum peak abs difference to confirm detection; else treat as baseline
 SEARCH_START_FRAC = 0.25  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
 AIR_REF_ROWS      = 30    # Top rows used as air brightness reference
@@ -79,11 +80,12 @@ def detect_water_surface(roi_gray, baseline, col_slice, search_start, search_end
     if np.max(reg) < MIN_DIFF_CONFIDENCE:
         return search_end
 
-    gradients = np.abs(np.diff(reg))
-    if len(gradients) == 0:
+    peak = np.max(reg)
+    threshold = np.min(reg) + (peak - np.min(reg)) * DIFF_CROSS_FRAC
+    crossings = np.where(reg >= threshold)[0]
+    if len(crossings) == 0:
         return search_end
-
-    return search_start + np.argmax(gradients)
+    return search_start + crossings[0]
 
 # --- First pass: accumulate baseline frames ---
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
