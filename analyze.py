@@ -9,11 +9,11 @@ from pathlib import Path
 TAPE_EDGE_COLS    = 10    # Number of columns to use for median profile (background only)
 TAPE_COL_OFFSET   = 0     # Starting column offset in ROI
 BASELINE_FRAMES   = 100   # Number of initial frames for brightness baseline
-DIFF_SMOOTH       = 51    # Boxcar kernel for smoothing diff profile
+DIFF_SMOOTH       = 151   # Boxcar kernel for smoothing diff profile (suppresses Sharpie dip)
 MIN_DIFF_CONFIDENCE = 4   # Minimum peak abs difference to confirm detection; else treat as baseline
 SEARCH_START_FRAC = 0.25  # Fraction of ROI height to start water surface search
 SEARCH_END_FRAC   = 0.95  # Fraction of ROI height to end search
-AIR_REF_ROWS      = 30    # Top rows used as air brightness reference
+AIR_REF_ROWS      = 50    # Top rows used as air brightness reference
 
 PREVIEW_EVERY_N_FRAMES = 128
 
@@ -75,8 +75,10 @@ def detect_water_surface(roi_gray, baseline, col_slice, search_start, search_end
     k = np.ones(DIFF_SMOOTH) / DIFF_SMOOTH
     diff_sm = np.convolve(diff, k, mode='same')
 
-    # Subtract median diff in air region to cancel residual exposure drift
-    air_offset = np.median(diff_sm[:AIR_REF_ROWS * 4])
+    # Subtract median diff in air region (avoids boundary effects, stays above search window)
+    air_end = min(DIFF_SMOOTH // 2 + AIR_REF_ROWS * 4, search_start)
+    air_region = slice(DIFF_SMOOTH // 2, air_end)
+    air_offset = np.median(diff_sm[air_region])
     diff_norm = np.maximum(diff_sm - air_offset, 0)
 
     reg = diff_norm[search_start:search_end]
