@@ -2,8 +2,7 @@ import unittest
 import sys
 import os
 
-# Add src to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 from unittest.mock import MagicMock, patch
@@ -14,33 +13,39 @@ class TestProcessVideo(unittest.TestCase):
     @patch('process.load_cal')
     @patch('process.detect_surface')
     def test_process_video_two_pass(self, mock_detect, mock_load_cal, mock_video_capture):
-        # Setup
         mock_cal = {
             'baseline_y': 500,
-            'pixels_per_cm': 10.0
+            'pixels_per_cm': 10.0,
+            'fps': 30.0,
+            'roi': {'x': 0, 'y': 0, 'w': 100, 'h': 100}
         }
         mock_load_cal.return_value = mock_cal
-        
+
+        fake_thresh = np.zeros((100, 100), dtype=np.uint8)
+
         mock_cap = MagicMock()
-        # Simulate 2 frames
         mock_cap.read.side_effect = [
-            (True, np.zeros((100, 100, 3))),
-            (True, np.zeros((100, 100, 3))),
+            (True, np.zeros((100, 100, 3), dtype=np.uint8)),
+            (True, np.zeros((100, 100, 3), dtype=np.uint8)),
             (False, None)
         ]
+        mock_cap.get.return_value = 100
         mock_video_capture.return_value = mock_cap
-        
-        # Simulate detect_surface returns
-        mock_detect.side_effect = [400, 500] # surface_y
-        
-        # Run
+
+        mock_detect.side_effect = [
+            (400, fake_thresh, 'primary'),
+            (500, fake_thresh, 'fallback')
+        ]
+
         results = process.process_video('dummy.mp4')
-        
-        # Assert
-        # Frame 1: pixel_displacement = 500 - 400 = 100. wave_height = 100 / 10 = 10.0
-        # Frame 2: pixel_displacement = 500 - 500 = 0. wave_height = 0 / 10 = 0.0
-        self.assertEqual(results, [10.0, 0.0])
-        self.assertEqual(mock_cap.read.call_count, 3)
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]['wave_height_cm'], 10.0)
+        self.assertEqual(results[0]['detection_confidence'], 'primary')
+        self.assertEqual(results[0]['frame_number'], 1)
+        self.assertEqual(results[1]['wave_height_cm'], 0.0)
+        self.assertEqual(results[1]['detection_confidence'], 'fallback')
+        self.assertEqual(results[1]['frame_number'], 2)
 
 if __name__ == '__main__':
     unittest.main()

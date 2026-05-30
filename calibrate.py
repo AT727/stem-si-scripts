@@ -1,140 +1,96 @@
 import sys
+import ctypes
 import cv2
 import json
 import numpy as np
 
-TAPE_EDGE_COLS = 60  # matches analyze.py — leftmost columns used for detection
+def calibrate(video_path, dist_cm=None):
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Could not read video frame.")
+        return
 
-def _show_scaled(window_name, image, max_width=1280, max_height=720):
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-    h, w = image.shape[:2]
-    scale = min(max_width / w, max_height / h, 1.0)
-    display_w, display_h = int(w * scale), int(h * scale)
-    cv2.resizeWindow(window_name, display_w, display_h)
-    cv2.imshow(window_name, image)
+    # Scale display to fit screen for ROI selection
+    img_h, img_w = frame.shape[:2]
+    user32 = ctypes.windll.user32
+    screen_w = user32.GetSystemMetrics(0)
+    screen_h = user32.GetSystemMetrics(1)
+    max_display_w = int(screen_w * 0.95)
+    max_display_h = int(screen_h * 0.85)
+    scale = min(max_display_w / img_w, max_display_h / img_h, 1.0)
 
-cap = cv2.VideoCapture(sys.argv[1])
-ret, frame = cap.read()
-if not ret:
-    print(f"Failed to read first frame from: {sys.argv[1]}")
-    print(f"Video opened: {cap.isOpened()}")
-    cap.release()
-    sys.exit(1)
+    if scale < 1.0:
+        display_w = int(img_w * scale)
+        display_h = int(img_h * scale)
+        display_frame = cv2.resize(frame, (display_w, display_h))
+    else:
+        display_frame = frame
 
-fps = cap.get(cv2.CAP_PROP_FPS)
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-print(f"Detected FPS: {fps}")
-print(f"Total frames: {total_frames}")
-print(f"Frame resolution: {frame.shape[1]}x{frame.shape[0]}")
+    cv2.namedWindow("Calibration", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    roi = cv2.selectROI("Calibration", display_frame, fromCenter=False, showCrosshair=True)
+    cv2.destroyWindow("Calibration")
+    x, y, w, h = roi
+    x = int(x / scale)
+    y = int(y / scale)
+    w = int(w / scale)
+    h = int(h / scale)
+    
+    # User clicks
+    points = []
+    def mouse_callback(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((x, y))
+            print(f"Point {len(points)}: ({x}, {y})")
 
-if fps < 1:
-    fps = float(input("FPS is 0 or invalid. Enter FPS manually: "))
+    print("\nClick 3 points in the zoomed window (in order):")
+    print("  Click 1: Still-water baseline (this is your zero reference)")
+    print("  Click 2: A known reference point some distance above Click 1")
+    print("  Click 3: The wave ceiling (the highest point you expect waves to reach)")
+    print()
 
-_show_scaled("First Frame - Select ROI around tape column", frame)
-print("Draw a rectangle tightly around the measuring tape column ONLY.")
-print(f"The script will automatically expand the box {TAPE_EDGE_COLS}px to the left for the water.")
-roi = cv2.selectROI("First Frame - Select ROI around tape column", frame)
-cv2.destroyWindow("First Frame - Select ROI around tape column")
+    click_frame = frame[y:y+h, x:x+w].copy()
+    instruction = "Click 3 points in order (see terminal for descriptions). Press any key when done."
+    cv2.putText(click_frame, instruction, (10, click_frame.shape[0] - 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+    cv2.namedWindow("Click Points")
+    cv2.setMouseCallback("Click Points", mouse_callback)
+    cv2.imshow("Click Points", click_frame)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
-x, y, w, h = map(int, roi)
+    if len(points) < 3:
+        print("Need 3 clicks: baseline, ref, ceiling")
+        return
 
-if w == 0 or h == 0:
-    print("ROI selection cancelled. Exiting.")
-    sys.exit(1)
+    base_y = points[0][1] + y
+    ref_y = points[1][1] + y
+    ceiling_y = points[2][1] + y
 
-# --- AUTO-ADJUST ROI TO THE LEFT ---
-# Shift x left by TAPE_EDGE_COLS to capture the water column
-new_x = max(0, x - TAPE_EDGE_COLS)
-added_cols = x - new_x
-new_w = w + added_cols
+    if dist_cm is None:
+        dist_cm = float(input("Enter distance between points 1 and 2 (cm): "))
+    pixels_per_cm = abs(base_y - ref_y) / dist_cm
+    
+    headroom_cm = (base_y - ceiling_y) / pixels_per_cm
+    print(f"Wave ceiling headroom: {headroom_cm:.1f} cm above baseline")
+    
+    cal = {
+        "pixels_per_cm": pixels_per_cm,
+        "baseline_y": base_y,
+        "wave_ceiling_y": ceiling_y,
+        "roi": {"x": x, "y": y, "w": w, "h": h},
+        "fps": cap.get(cv2.CAP_PROP_FPS),
+        "edge_cols": 60
+    }
+    
+    with open("calibration.json", "w") as f:
+        json.dump(cal, f, indent=2)
+    print("Saved to calibration.json")
 
-print(f"\nAuto-adjusting ROI: shifting left by {added_cols}px to include water column.")
-
-roi_frame = frame[y:y+h, new_x:new_x+new_w]
-
-# --- DRAW VISUAL GUIDES ---
-# Create a copy with a strict boundary line so the user can verify the left 60px is water
-guide_display = roi_frame.copy()
-cv2.line(guide_display, (added_cols, 0), (added_cols, h), (0, 0, 255), 2)
-cv2.putText(guide_display, "WATER ZONE", (5, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-cv2.putText(guide_display, "TAPE ZONE", (added_cols + 10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-_show_scaled("ROI - Click two points on the tape", guide_display)
-
-clicks = []
-
-def mouse_callback(event, x_roi, y_roi, flags, param):
-    if event == cv2.EVENT_LBUTTONDOWN and len(clicks) < 2:
-        clicks.append((x_roi, y_roi))
-        print(f"Click {len(clicks)}: ({x_roi}, {y_roi})")
-        display = guide_display.copy()
-        for i, (cx, cy) in enumerate(clicks):
-            color = (0, 255, 0) if i == 0 else (255, 0, 0)
-            cv2.circle(display, (cx, cy), 5, color, -1)
-            cv2.putText(display, str(i + 1), (cx + 8, cy - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        cv2.imshow("ROI - Click two points on the tape", display)
-
-cv2.setMouseCallback("ROI - Click two points on the tape", mouse_callback)
-
-print("\nClick two points on the measuring tape (Right of the red line):")
-print("  Click 1: the zero/still-water baseline mark")
-print("  Click 2: a known reference point N cm above it")
-print("(Press any key after both clicks are placed)\n")
-
-cv2.waitKey(0)
-cv2.destroyWindow("ROI - Click two points on the tape")
-
-if len(clicks) < 2:
-    print("Need exactly 2 clicks. Restart calibration.")
-    sys.exit(1)
-
-point1 = clicks[0]
-point2 = clicks[1]
-
-ref_cm = float(input("Enter the real-world distance in cm between the two clicked points: "))
-
-pixel_distance = abs(point1[1] - point2[1])
-
-if pixel_distance < 5:
-    print(f"ERROR: Points are only {pixel_distance}px apart — too close for accurate ratio.")
-    print("Re-run calibration and select points further apart.")
-    sys.exit(1)
-
-pixels_per_cm = pixel_distance / ref_cm
-baseline_y = point1[1]
-
-# Save the newly adjusted X and W parameters
-calibration = {
-    "pixels_per_cm": round(pixels_per_cm, 2),
-    "roi": {"x": new_x, "y": y, "w": new_w, "h": h},
-    "baseline_y": baseline_y,
-    "fps": fps
-}
-
-with open("calibration.json", "w") as f:
-    json.dump(calibration, f, indent=2)
-
-print(f"\nComputed pixels_per_cm: {pixels_per_cm:.2f}")
-
-with open("calibration.json", "r") as f:
-    saved = json.load(f)
-print("Saved calibration.json — valid JSON confirmed")
-
-# Draw the final confirmation overlay
-confirm = guide_display.copy()
-for i, (cx, cy) in enumerate(clicks):
-    color = (0, 255, 0) if i == 0 else (255, 0, 0)
-    cv2.circle(confirm, (cx, cy), 5, color, -1)
-    cv2.putText(confirm, str(i + 1), (cx + 8, cy - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
-cv2.line(confirm, (0, baseline_y), (new_w - 1, baseline_y), (0, 255, 255), 1)
-cv2.putText(confirm, "baseline", (5, baseline_y - 5),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-_show_scaled("Calibration Verification", confirm)
-print("Close the window to exit.")
-cv2.waitKey(0)
-cv2.destroyAllWindows()
-cap.release()
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python calibrate.py <video_path> [dist_cm]")
+        sys.exit(1)
+    video_path = sys.argv[1]
+    dist_cm = float(sys.argv[2]) if len(sys.argv) > 2 else None
+    calibrate(video_path, dist_cm)
